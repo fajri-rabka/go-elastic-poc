@@ -1,0 +1,12 @@
+# Local environment
+.env
+
+# Build and test artifacts
+bin/
+tmp/
+coverage.out
+*.log
+
+# Editors
+.idea/
+.vscode/
