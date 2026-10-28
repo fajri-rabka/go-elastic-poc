@@ -30,6 +30,9 @@ Fokusnya: ngerti **apa yang sudah ada di repo**, **kenapa dibikin begitu**, dan 
 16. [Responsibility tiap file](#16-responsibility-tiap-file)
 17. [Cara baca dan jalanin source code](#17-cara-baca-dan-jalanin-source-code)
 18. [Kalau Elasticsearch nggak tersedia](#18-kalau-elasticsearch-nggak-tersedia)
+19. [Pembelajaran Phase 3 — Honda Motorcycle Index & Document](#19-pembelajaran-phase-3--honda-motorcycle-index--document)
+20. [Pembelajaran Phase 4 — Motorcycle REST API CRUD](#20-pembelajaran-phase-4--motorcycle-rest-api-crud)
+21. [Pembelajaran Phase 5 — Motorcycle Search, Filtering, Sorting & Pagination](#21-pembelajaran-phase-5--motorcycle-search-filtering-sorting--pagination)
 
 ---
 
@@ -708,6 +711,159 @@ curl -i -X PUT http://127.0.0.1:8080/motorcycles/honda-scoopy-api-001 \
 # 5. Delete motorcycle (DELETE)
 curl -i -X DELETE http://127.0.0.1:8080/motorcycles/honda-scoopy-api-001
 ```
+
+---
+
+## 21. Pembelajaran Phase 5 — Motorcycle Search, Filtering, Sorting & Pagination
+
+Di Phase 5, kita melangkah ke kekuatan sejati Elasticsearch: kemampuan pencarian canggih (*advanced search*), filtering terstruktur, multi-field sorting, dan pagination yang efisien. Kita membangun endpoint `GET /motorcycles` yang fleksibel namun tetap terlindungi dari crash performa.
+
+Berikut 16 konsep fundamental Phase 5 yang wajib lu kuasai sebagai backend engineer Go:
+
+### 1. Apa itu Search API di Elasticsearch dan bedanya dengan GET by ID?
+- **Real-time vs Near-Real-Time (NRT):**
+  - **GET by ID (`GET /index/_doc/id`):** Bersifat **real-time**. Operasi ini membaca langsung dari translog (*transaction log*) atau segment memori Lucene terbaru. Begitu dokumen berhasil di-insert atau di-update, detik itu juga dokumen bisa langsung dibaca lewat ID-nya.
+  - **Search API (`POST /index/_search`):** Bersifat **Near-Real-Time (NRT)**. Search mengeksekusi inverted index pada segment Lucene yang sudah di-*refresh*. Secara default, Elasticsearch melakukan refresh berkala setiap 1 detik (`refresh_interval: "1s"`). Artinya, ada jeda hingga ~1 detik antara saat dokumen ditulis sampai dokumen tersebut muncul di hasil pencarian.
+- **Kapan ini terasa?** Saat lu melakukan integrasi otomatis: insert dokumen lalu langsung search dalam rentang beberapa milidetik, dokumen baru bisa jadi belum muncul kecuali index di-refresh (`POST /motorcycles/_refresh`).
+- **Alasan teknis:** Melakukan refresh setiap ada write itu mahal secara I/O dan CPU karena harus membuat segment Lucene baru. Oleh karena itu, Elasticsearch menumpuk perubahan di in-memory buffer sebelum di-refresh secara berkala.
+
+### 2. Apa itu Query Context vs Filter Context? Kapan pakai `must` vs `filter`?
+- **Query Context (`must` / `should`):**
+  - Menjawab pertanyaan: *"Seberapa cocok dokumen ini dengan query pencarian?"*
+  - Menghitung **relevance score (`_score`)**. Semakin cocok kata kuncinya, semakin tinggi skor dokumen.
+  - Contoh: Pencarian teks bebas (full-text search) seperti kata kunci `"BeAT"` atau `"motor harian"`.
+  - Tidak di-cache secara otomatis oleh Elasticsearch.
+- **Filter Context (`filter` / `must_not`):**
+  - Menjawab pertanyaan biner sederhana: *"Apakah dokumen ini memenuhi syarat? Ya atau Tidak?"*
+  - **TIDAK menghitung score** (`_score` tidak terpengaruh).
+  - Hasil filter otomatis di-cache dalam memory (*node query cache*) oleh Elasticsearch menggunakan bitset, sehingga eksekusi filter berikutnya sangat cepat.
+  - Contoh: Filter status `available == true`, filter kategori `category == "matic"`, atau rentang harga `min_price <= price_idr <= max_price`.
+- **Golden Rule:** Jika lu butuh pencarian teks relevansi, taruh di Query Context (`must`). Jika lu butuh filter data kaku (kategori, status, range harga/tanggal), **selalu taruh di Filter Context (`filter`)**.
+
+### 3. Apa itu `bool` Query dan bagaimana strukturnya?
+- `bool` query adalah query gabungan (*compound query*) di Elasticsearch yang bertindak seperti operator logika boolean di SQL (`AND`, `OR`, `NOT`):
+  1. `must`: Harus cocok (seperti `AND`). Berkontribusi ke perhitungan `_score` (Query Context).
+  2. `filter`: Harus cocok (seperti `AND`). **TIDAK** berkontribusi ke `_score` (Filter Context). Hasilnya di-cache.
+  3. `should`: Boleh cocok (seperti `OR`). Jika berada di Query Context, mencocokkan lebih banyak clause akan menaikkan `_score`.
+  4. `must_not`: Tidak boleh cocok (seperti `NOT` / `!=`). Berada di Filter Context (tidak berpengaruh ke score).
+- **Di codebase kita:**
+  Jika ada parameter `search`, kita masukkan `multi_match` ke dalam `bool.must`.
+  Semua filter (`category`, `transmission`, `available`, `price_idr`) kita masukkan ke dalam `bool.filter`.
+  Jika tidak ada search dan tidak ada filter sama sekali, kita gunakan `match_all` query.
+
+### 4. Apa itu `multi_match` Query?
+- `multi_match` memungkinkan kita mencari kata kunci yang sama ke dalam beberapa text fields sekaligus dalam satu query.
+- Contoh di project kita:
+  ```go
+  esdsl.NewMultiMatchQuery(search).Fields("model_name^2", "description")
+  ```
+- Alih-alih membuat beberapa `match` query manual yang di-OR-kan, `multi_match` mengevaluasi kata kunci di field `model_name` dan `description` sekaligus, lalu menggabungkan skor relevansinya sesuai tipe kecocokan (default: `best_fields`).
+
+### 5. Apa itu Field Boosting (contoh: `model_name^2`)?
+- **Pengertian:** Teknik memberi bobot relevansi lebih tinggi pada field tertentu. Sintaks `model_name^2` berarti skor kecocokan pada field `model_name` dilipatgandakan sebesar **2 kali lipat** dibanding kecocokan pada `description`.
+- **Kenapa penting?** Jika seorang pembeli mencari kata `"BeAT"`, dokumen yang mencantumkan nama model `"BeAT"` jauh lebih relevan untuk berada di urutan teratas daripada motor lain yang kebetulan hanya menyebutkan kata "beat" di dalam paragraf deskripsinya.
+- Boosting memastikan hasil pencarian terasa intuitif bagi pengguna.
+
+### 6. Apa itu `term` Query dan kenapa untuk exact match?
+- `term` query mencari nilai yang **persis sama (exact match)** di dalam inverted index tanpa melakukan analisis/tokenisasi pada nilai pencarian.
+- Oleh karena itu, `term` query harus dipasangkan dengan field yang **tidak di-tokenize**, yaitu field bertipe `keyword` (seperti `category`, `transmission`) atau tipe `boolean` (`available`).
+- **Peringatan junior:** Jangan gunakan `term` query pada field bertipe `text` standar! Karena field `text` di-tokenize menjadi huruf kecil per kata oleh standard analyzer, query `term` yang mencari kalimat utuh atau huruf besar akan gagal menemukan dokumen.
+
+### 7. Apa itu `range` Query pada harga (`price_idr`)?
+- `range` query mencocokkan dokumen yang memiliki nilai numerik, tanggal, atau IP di dalam rentang tertentu.
+- Operator yang didukung:
+  - `gte`: Greater than or equal (>=)
+  - `gt`: Greater than (>)
+  - `lte`: Less than or equal (<=)
+  - `lt`: Less than (<)
+- Di project kita, kita menggunakan `esdsl.NewNumberRangeQuery("price_idr")` di dalam `bool.filter`. Jika client mengirim `min_price=15000000`, kita set `.Gte(...)`. Jika mengirim `max_price=25000000`, kita set `.Lte(...)`. Karena berada di Filter Context, operasi range ini sangat efisien dan di-cache.
+
+### 8. Bagaimana Sorting bekerja di Elasticsearch?
+- Secara default, jika tidak ada sort yang ditentukan dan ada query pencarian, Elasticsearch akan mengurutkan dokumen berdasarkan skor relevansi: `_score` descending (dokumen paling cocok di paling atas).
+- Jika user meminta pengurutan harga (`price_asc` atau `price_desc`), Elasticsearch mengabaikan `_score` dan menyortir dokumen berdasarkan nilai kolom menggunakan struktur data columnar bernama **doc_values**.
+- Di project kita:
+  - Jika ada `search` tapi tanpa sort -> default `relevance` (`_score` desc).
+  - Jika tidak ada `search` -> default `name_asc` (`model_name.keyword` asc).
+  - User juga bisa memilih `price_asc`, `price_desc`, atau `name_desc`.
+
+### 9. Kenapa sort pada `model_name.keyword` bukan pada `model_name`?
+- **Text field vs Keyword sub-field:**
+  - Field `model_name` bertipe `text`. Tipe `text` dipecah menjadi token-token kata (misal: "CB150R Streetfire" dipecah jadi `cb150r` dan `streetfire`). Mengurutkan teks yang terpecah butuh struktur in-memory mahal bernama `fielddata` yang secara default dimatikan di Elasticsearch karena bisa menghabiskan RAM (*Out of Memory*).
+  - Untungnya, pada explicit mapping kita definisikan sub-field multifield:
+    ```json
+    "model_name": {
+      "type": "text",
+      "fields": {
+        "keyword": { "type": "keyword", "ignore_above": 256 }
+      }
+    }
+    ```
+  - Sub-field `model_name.keyword` menyimpan string asli secara utuh tanpa tokenisasi di dalam **doc_values** (struktur disk columnar yang hemat RAM).
+  - Oleh karena itu, kita selalu melakukan sorting pada `model_name.keyword`!
+
+### 10. Bagaimana Pagination dengan `from` dan `size`?
+- `from`: Offset dokumen yang dilewati (0-indexed). Rumusnya: `(page - 1) * limit`.
+- `size`: Jumlah dokumen yang dikembalikan per halaman (`limit`).
+- Contoh: Halaman 1 dengan limit 10 -> `from = 0`, `size = 10`. Halaman 2 dengan limit 10 -> `from = 10`, `size = 10`.
+- Ini adalah metode pagination paling sederhana dan umum untuk web catalog.
+
+### 11. Apa itu `max_result_window` dan kenapa harus diproteksi di Go?
+- Di Elasticsearch, setting `index.max_result_window` memiliki nilai default **10,000**.
+- **Bahaya Deep Pagination:** Jika client meminta `page=10001&limit=10`, nilai `from + size = 100,010`. Untuk mengembalikan 10 dokumen di halaman itu, setiap shard harus mengurutkan dan menampung 100,010 dokumen di memori sebelum membuang 100,000 pertama! Ini bisa membuat cluster OOM dan crash.
+- Jika query melebihi 10,000, Elasticsearch akan mengembalikan error 500 `Result window is too large`.
+- **Solusi Engineering:** Service Go kita secara proaktif memeriksa `from + limit <= 10000`. Jika melebihi batas, kita langsung tolak di layer aplikasi dengan HTTP 400 Bad Request: `"page offset and limit exceed maximum result window of 10000"`. Jangan biarkan request berbahaya sampai membebani cluster database.
+
+### 12. Apa itu `track_total_hits`?
+- Secara default, untuk optimasi kecepatan pada dataset jutaan dokumen, Elasticsearch membatasi penghitungan total hits hanya sampai 10,000 (`hits.total.relation = "gte"`).
+- Dengan mengaktifkan `TrackTotalHits(esdsl.NewTrackHits().Bool(true))`, Elasticsearch dipaksa menghitung jumlah dokumen yang cocok secara akurat (`hits.total.relation = "eq"`).
+- Ini penting agar UI frontend bisa menghitung `total_pages` dengan tepat (`ceil(total / limit)`).
+
+### 13. Cara kerja Typed API & `esdsl` di `go-elasticsearch/v9`
+- Official client v9 menyediakan DSL builder type-safe di package `github.com/elastic/go-elasticsearch/v9/typedapi/esdsl`.
+- Builder functions seperti `esdsl.NewBoolQuery()`, `esdsl.NewMultiMatchQuery()`, `esdsl.NewTermQuery()`, dan `esdsl.NewNumberRangeQuery()` mengembalikan antarmuka `types.QueryVariant`.
+- Hal ini mencegah kesalahan penulisan string JSON mentah (*typo*) saat runtime dan memberikan autocompletion serta compile-time safety.
+- **Catatan Teknis Unit Test:** Builder wrapper struct di `esdsl` memiliki unexported fields. Untuk melakukan serialisasi JSON pada unit test query builder, kita memanggil method `.QueryCaster()` atau `.SortCombinationsCaster()`.
+
+### 14. Struktur Response Search Elasticsearch & Cara Decode di Go
+- Struktur response search:
+  ```json
+  {
+    "hits": {
+      "total": { "value": 1, "relation": "eq" },
+      "hits": [
+        {
+          "_index": "motorcycles",
+          "_id": "honda-beat-001",
+          "_score": 1.25,
+          "_source": {
+            "brand": "Honda",
+            "model_name": "BeAT", ...
+          }
+        }
+      ]
+    }
+  }
+  ```
+- Di Go:
+  - Total dokumen dibaca dari `res.Hits.Total.Value`.
+  - Tiap hit di-loop dari `res.Hits.Hits`.
+  - Identifier dokumen diambil dari `*hit.Id_`.
+  - Data payload didecode via `json.Unmarshal(hit.Source_, &m)`.
+  - Keduanya digabung ke struct `model.MotorcycleWithID{ ID: id, Motorcycle: m }`.
+
+### 15. Kenapa Response List JSON harus `[]` bukan `null`?
+- Jika slice Go dideklarasikan tanpa inisialisasi (`var items []MotorcycleWithID`), Go menyimpannya sebagai `nil`.
+- Jika slice bernilai `nil` di-marshal dengan `json.Marshal`, hasilnya adalah `"data": null`.
+- Bagi frontend developer (JavaScript, React, Flutter, Android, iOS), menerima `null` untuk field daftar/array sering kali memicu error runtime legendaris: `Cannot read properties of null (reading 'map')` atau `NullPointerException`.
+- Dengan menginisialisasi slice kosong: `make([]model.MotorcycleWithID, 0, len(...))`, JSON serializer selalu menghasilkan `"data": []`. Ini adalah standar API profesional yang ramah frontend.
+
+### 16. Cara Go 1.22+ `net/http` membedakan Rute tanpa Collision
+- Sebelum Go 1.22, mendaftarkan `/motorcycles` dan `/motorcycles/{id}` sering kali bentrok atau butuh router pihak ketiga seperti Gorilla Mux atau Chi.
+- Di Go 1.22+, standard library `net/http.ServeMux` mendukung routing berbasis method dan path pattern:
+  - `GET /motorcycles`: Pola pasti (*exact pattern* tanpa trailing slash). Hanya menangkap request yang tepat ke path `/motorcycles`.
+  - `GET /motorcycles/{id}`: Pola dengan path parameter `{id}`. Menangkap request dengan satu segmen tambahan setelah `/motorcycles/` (seperti `/motorcycles/honda-beat-001`).
+- Keduanya tidak bentrok (*no route collision*), bersih, dan sepenuhnya menggunakan Go standard library tanpa dependensi framework external.
+
 
 
 

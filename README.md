@@ -5,12 +5,12 @@ The application stores and queries domain data (Honda motorcycle catalog) as JSO
 
 > This project is **not** about logging, Elastic APM, OpenTelemetry, distributed tracing, or Kibana observability.
 
-> **Current status: Phase 4 (Motorcycle REST API CRUD) — DONE.**
+> **Current status: Phase 5 (Motorcycle Search, Filtering, Sorting & Pagination) — DONE.**
 > - **Phase 1 (Infra):** Elasticsearch 9.5.5 single-node cluster via Docker Compose with persistent named volume and healthcheck.
 > - **Phase 2 (Connection):** Official Elasticsearch Go Typed Client v9 (`github.com/elastic/go-elasticsearch/v9`).
 > - **Phase 3 (Index & Document):** Index `motorcycles` with explicit strict mapping, `Motorcycle` domain model, sample Honda BeAT document, real-time GET by ID, and verified idempotency.
 > - **Phase 4 (REST API CRUD):** Full HTTP REST API (`net/http`, Go 1.22+ routing) covering Create (POST), Read (GET), Replace (PUT), Delete (DELETE), and Health check, backed by optimistic concurrency control and strict business validation.
-> - Search and filtering arrive in Phase 5.
+> - **Phase 5 (Search & Filter):** Rich search API (`GET /motorcycles`) featuring full-text `multi_match` with boost (`model_name^2`, `description`), exact keyword filtering (`category`, `transmission`), boolean filter (`available`), numeric range filter (`price_idr`), multi-field sorting, and safe bounded pagination (`max_result_window = 10000`).
 >
 > Complete progress, architecture details, and verification evidence: [docs/ROADMAP.md](docs/ROADMAP.md).
 
@@ -52,13 +52,14 @@ HTTP Client / Postman
    JSON Document (Honda catalog)
 ```
 
-**Implemented in Phase 4:**
+**Implemented Endpoints (Phase 4 & 5):**
 
 ```text
 HTTP Client / curl / Postman
   │
   ├── GET    /health           --> 200 {"status":"ok"}
   ├── POST   /motorcycles      --> 201 Created (validates brand=Honda, unique ID, stores doc)
+  ├── GET    /motorcycles      --> 200 OK (search, filter, sort, and paginated catalog)
   ├── GET    /motorcycles/{id} --> 200 OK (real-time read by _id)
   ├── PUT    /motorcycles/{id} --> 200 OK (full replacement with optimistic concurrency lock)
   └── DELETE /motorcycles/{id} --> 204 No Content (removes doc by _id)
@@ -69,26 +70,28 @@ HTTP Client / curl / Postman
 ```text
 .
 ├── cmd/
-│   ├── api/main.go                    # Entrypoint: Phase 4 REST API server (make run)
+│   ├── api/main.go                    # Entrypoint: REST API server (make run)
 │   └── demo/main.go                   # Entrypoint: Phase 3 index & document demo (make demo)
 ├── internal/
 │   ├── config/
 │   │   ├── config.go                  # Configuration (ES URL, index, HTTP addr) & index validator
 │   │   └── config_test.go             # Unit tests for config loading & validation
 │   ├── handler/
-│   │   ├── motorcycle.go              # HTTP handlers, strict JSON decoder, status mapper
+│   │   ├── motorcycle.go              # HTTP handlers, query parsers, strict JSON decoder, status mapper
 │   │   └── motorcycle_test.go         # HTTP endpoint tests with net/http/httptest
 │   ├── model/
-│   │   └── motorcycle.go              # Domain model & JSON tags
+│   │   └── motorcycle.go              # Domain models: Motorcycle, SearchFilter, SearchResult
 │   ├── repository/elastic/
 │   │   ├── client.go                  # Elasticsearch Typed Client constructor
 │   │   ├── motorcycle.go              # EnsureIndex, Create, Get, Replace, Delete operations
+│   │   ├── motorcycle_search.go       # Search operation with multi_match, bool query, sort & pagination
+│   │   ├── motorcycle_search_test.go  # Unit tests for search query builder & sort options
 │   │   └── motorcycle_test.go         # Mapping & error type unit tests
 │   └── service/
-│       ├── motorcycle.go              # Business validation rules & repository coordinator
+│       ├── motorcycle.go              # Business validation rules, pagination windows & repo coordinator
 │       └── motorcycle_test.go         # Unit tests for domain business logic
 ├── docs/
-│   ├── LEARNING_GUIDE.md              # Technical explanations & 20 core concepts
+│   ├── LEARNING_GUIDE.md              # Technical explanations & 21 core concepts
 │   ├── ROADMAP.md                     # Phase tracker & runtime evidence logs
 │   └── TROUBLESHOOTING.md             # Common issues & step-by-step solutions
 ├── compose.yml                        # Elasticsearch 9.5.5 single-node setup
@@ -160,6 +163,27 @@ curl -i -X POST http://127.0.0.1:8080/motorcycles \
 
 # Read motorcycle by ID
 curl -i http://127.0.0.1:8080/motorcycles/honda-scoopy-api-001
+
+# List motorcycles (default: page 1, limit 10, sorted by name asc)
+curl -i "http://127.0.0.1:8080/motorcycles"
+
+# Full-text search with boost (model_name^2, description)
+curl -i "http://127.0.0.1:8080/motorcycles?search=BeAT"
+
+# Filter by category and transmission
+curl -i "http://127.0.0.1:8080/motorcycles?category=matic&transmission=automatic"
+
+# Filter by availability
+curl -i "http://127.0.0.1:8080/motorcycles?available=true"
+
+# Filter by price range (IDR)
+curl -i "http://127.0.0.1:8080/motorcycles?min_price=15000000&max_price=25000000"
+
+# Sorting and Pagination
+curl -i "http://127.0.0.1:8080/motorcycles?sort=price_desc&page=1&limit=5"
+
+# Combined Search, Filter, Sort, and Pagination
+curl -i "http://127.0.0.1:8080/motorcycles?search=harian&category=matic&available=true&sort=price_asc&page=1&limit=10"
 
 # Full replacement (PUT)
 curl -i -X PUT http://127.0.0.1:8080/motorcycles/honda-scoopy-api-001 \

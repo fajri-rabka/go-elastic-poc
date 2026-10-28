@@ -3,7 +3,7 @@
 Roadmap ini ditulis berdasarkan **evidence nyata**, bukan asumsi.
 Tiap phase dilengkapi objective, deliverable, definition of done, dan bukti verifikasi runtime.
 
-**Terakhir diperbarui:** 2026-10-29 (Phase 4 — Motorcycle REST API CRUD selesai dan terbukti).
+**Terakhir diperbarui:** 2026-10-29 (Phase 5 — Motorcycle Search, Filtering, Sorting & Pagination selesai dan terbukti).
 
 ## Legenda status
 
@@ -21,7 +21,7 @@ flowchart LR
     P1["Phase 1: ES Infrastructure<br/>(DONE)"] --> P2["Phase 2: Go Connection<br/>(DONE)"]
     P2 --> P3["Phase 3: Index & Document<br/>(DONE)"]
     P3 --> P4["Phase 4: CRUD API<br/>(DONE)"]
-    P4 --> P5["Phase 5: Search & Filter<br/>(NOT IMPLEMENTED)"]
+    P4 --> P5["Phase 5: Search & Filter<br/>(DONE)"]
     P5 --> P6["Phase 6: Final Delivery<br/>(NOT IMPLEMENTED)"]
 ```
 
@@ -31,7 +31,7 @@ flowchart LR
 | 2 — Go Connection | DONE | Official Typed Client v9.5.2, `client.Info()` return 9.5.5, error path teruji |
 | 3 — Index & Document | DONE | Index `motorcycles` (1 shard, 0 replica, strict mapping), sample Honda BeAT tersimpan & terbaca, idempotent |
 | 4 — CRUD API | DONE | REST API lengkap (POST, GET, PUT, DELETE, health), Go 1.22+ routing, optimistic locking, 100% test pass |
-| 5 — Elasticsearch Search | NOT IMPLEMENTED | Direncanakan (full-text search, filter, multi-field, pagination) |
+| 5 — Elasticsearch Search | DONE | Endpoint `GET /motorcycles` multi_match full-text, bool filtering, sorting, pagination, max_result_window guard, 100% pass |
 | 6 — Final POC Delivery | NOT IMPLEMENTED | Direncanakan (final review, demo handoff ke Koh Franz) |
 
 ---
@@ -264,19 +264,77 @@ flowchart LR
 
 ---
 
-## Phase 5 — Elasticsearch Search & Filter (Upcoming)
+## Phase 5 — Elasticsearch Search, Filtering, Sorting & Pagination (DONE)
 
-**Objective:** Mengeksplorasi kemampuan utama Elasticsearch untuk full-text search, filtering, dan sorting pada katalog motor.
+**Objective:** Mengimplementasikan endpoint pencarian tingkat lanjut (`GET /motorcycles`) yang mengeksploitasi fitur inti Elasticsearch: full-text search, bool query filtering, multi-field keyword sorting, dan pagination yang aman dari deep pagination crash.
 
 **Scope:**
-- Full-text search pada `description` dan `model_name`.
-- Filter exact match pada `brand`, `category`, `transmission`.
-- Range filter pada `price_idr` dan `engine_cc`.
-- Sorting berdasarkan harga atau nama model (menggunakan `model_name.keyword`).
-- Pagination menggunakan `from` dan `size`.
-- Penjelasan near-real-time (NRT) dan refresh behavior pada operasi pencarian.
+- Endpoint `GET /motorcycles` dengan query parameters: `search`, `category`, `transmission`, `available`, `min_price`, `max_price`, `sort`, `page`, `limit`.
+- Full-text multi-field search menggunakan `multi_match` dengan field boost (`model_name^2`, `description`).
+- Structured filtering menggunakan `bool.filter` (`term` queries untuk `category`, `transmission`, `available`, dan `range` query untuk `price_idr`).
+- Sorting multi-field: `relevance` (`_score`), `price_asc`, `price_desc`, `name_asc` (`model_name.keyword`), `name_desc` (`model_name.keyword`).
+- Safe pagination menggunakan `from` dan `size` dengan proteksi guard batas `from + size <= max_result_window` (10,000) dan batas limit 1–50 (default 10, default page 1).
+- JSON Response contract: `{"data": [...], "pagination": {"page": 1, "limit": 10, "total": 1, "total_pages": 1}}`. Jika hasil kosong, `data` di-serialize sebagai `[]` (bukan `null`).
+- Disambiguasi rute `GET /motorcycles` vs `GET /motorcycles/{id}` tanpa collision.
 
-**Dependencies:** Phase 4.
+**Deliverables:**
+- `internal/model/motorcycle.go`: Definisi `MotorcycleWithID`, `SearchFilter`, `SearchResult`.
+- `internal/repository/elastic/motorcycle_search.go`: Query builder dengan `esdsl`, execution typed client, `TrackTotalHits`, decoder `_id` & `_source`.
+- `internal/repository/elastic/motorcycle_search_test.go`: Unit tests serializer query builder dan sort options menggunakan `.QueryCaster()` dan `.SortCombinationsCaster()`.
+- `internal/service/motorcycle.go`: Validasi bisnis search (`ValidateSearchFilter`), sanitasi string, penentuan default sort berdasar konteks pencarian, dan proteksi pagination.
+- `internal/service/motorcycle_test.go`: Unit tests validasi parameter pencarian dan batas window.
+- `internal/handler/motorcycle.go`: HTTP handler `List`, parser query parameter, formatter payload JSON.
+- `internal/handler/motorcycle_test.go`: Mocked httptest covering status 200, 400, 503, empty slice, and route disambiguation.
+
+**Definition of Done Checklist:**
+- [x] Endpoint `GET /motorcycles` terdaftar dan dapat diakses tanpa tabrakan dengan `GET /motorcycles/{id}`.
+- [x] Full-text search `search` mencari di `model_name^2` (boosted) dan `description`.
+- [x] Filter exact term pada `category`, `transmission`, dan boolean `available`.
+- [x] Filter rentang numerik `min_price` dan `max_price` pada `price_idr`.
+- [x] Sorting bekerja untuk `relevance`, `price_asc`, `price_desc`, `name_asc`, dan `name_desc`. Sorting nama menggunakan `model_name.keyword`.
+- [x] Default sort: `relevance` jika ada parameter `search`, `name_asc` jika `search` kosong.
+- [x] Parameter `sort=relevance` ditolak (400 Bad Request) jika tidak ada kata kunci pencarian.
+- [x] Pagination valid: page >= 1 (default 1), limit 1–50 (default 10).
+- [x] Deep pagination guard: jika `(page-1)*limit + limit > 10000`, API mengembalikan 400 Bad Request.
+- [x] Response JSON mengembalikan `"data": []` (non-nil empty array) jika tidak ada data yang cocok.
+- [x] `go test -v ./...` dan `go vet ./...` exit 0 (100% pass).
+- [x] Runtime verification pada cluster Elasticsearch lokal terbukti sukses dengan data fixtures dan sample `honda-beat-001` tetap utuh.
+- [x] `make demo` tetap berjalan sukses dan idempotent.
+
+**Bukti Verifikasi Runtime:**
+1. Automated unit test suite:
+   ```text
+   PASS: TestBuildSearchQuery (4 subtests)
+   PASS: TestBuildSortOption (6 subtests)
+   PASS: TestValidateSearchFilter (14 subtests)
+   PASS: TestServiceSearchOperation (2 subtests)
+   PASS: TestHandlerListMotorcycles (18 subtests)
+   ok  	github.com/fajri-rabka/go-elasticsearch-poc/internal/config	(cached)
+   ok  	github.com/fajri-rabka/go-elasticsearch-poc/internal/handler	0.008s
+   ok  	github.com/fajri-rabka/go-elasticsearch-poc/internal/repository/elastic	0.011s
+   ok  	github.com/fajri-rabka/go-elasticsearch-poc/internal/service	0.005s
+   ```
+2. Runtime curl integration verification:
+   ```text
+   GET /motorcycles                                      -> 200 OK (4 items sorted by name asc, total: 4, pages: 1)
+   GET /motorcycles?search=BeAT                          -> 200 OK (1 item matched BeAT, score-based relevance)
+   GET /motorcycles?category=matic                       -> 200 OK (2 items: BeAT & Vario 160)
+   GET /motorcycles?sort=price_desc&page=1&limit=2       -> 200 OK (2 items: CBR250RR 75M, CB150R 31M, total_pages: 2)
+   GET /motorcycles?sort=price_desc&page=2&limit=2       -> 200 OK (2 items: Vario 160 28M, BeAT 19M)
+   GET /motorcycles?available=false                      -> 200 OK (1 item: Vario 160)
+   GET /motorcycles?min_price=15000000&max_price=30000000 -> 200 OK (2 items: BeAT 19M & Vario 160 28M)
+   GET /motorcycles?search=nonexistentterm               -> 200 OK ("data": [], total: 0, total_pages: 0)
+   GET /motorcycles?page=0                               -> 400 Bad Request ("page must be greater than or equal to 1")
+   GET /motorcycles?limit=0                              -> 400 Bad Request ("limit must be between 1 and 50")
+   GET /motorcycles?limit=51                             -> 400 Bad Request ("limit must be between 1 and 50")
+   GET /motorcycles?min_price=20000000&max_price=10000000 -> 400 Bad Request ("min_price cannot be greater than max_price")
+   GET /motorcycles?sort=invalid                         -> 400 Bad Request ("invalid sort option \"invalid\"")
+   GET /motorcycles?sort=relevance                       -> 400 Bad Request ("sort=relevance is only valid when a search query is provided")
+   GET /motorcycles?page=1001&limit=10                   -> 400 Bad Request ("page offset and limit exceed maximum result window of 10000")
+   GET /motorcycles/honda-beat-001                       -> 200 OK (route disambiguation confirmed, existing doc intact)
+   ```
+3. Phase 3 Demo verification:
+   `make demo` berhasil membaca `honda-beat-001` dengan idempotency verification utuh.
 
 ---
 
