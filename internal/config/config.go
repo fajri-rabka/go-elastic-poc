@@ -11,6 +11,7 @@ import (
 const (
 	defaultElasticsearchURL   = "http://localhost:9200"
 	defaultElasticsearchIndex = "motorcycles"
+	defaultHTTPAddr           = "127.0.0.1:8080"
 
 	// Elasticsearch rejects index names longer than 255 bytes.
 	maxIndexNameBytes = 255
@@ -19,6 +20,7 @@ const (
 type Config struct {
 	ElasticsearchURL   string
 	ElasticsearchIndex string
+	HTTPAddr           string
 }
 
 // Load reads configuration from the environment. Unset variables fall back to
@@ -28,6 +30,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		ElasticsearchURL:   envOrDefault("ELASTICSEARCH_URL", defaultElasticsearchURL),
 		ElasticsearchIndex: envOrDefault("ELASTICSEARCH_INDEX", defaultElasticsearchIndex),
+		HTTPAddr:           envOrDefault("HTTP_ADDR", defaultHTTPAddr),
 	}
 
 	if err := validateElasticsearchURL(cfg.ElasticsearchURL); err != nil {
@@ -35,6 +38,9 @@ func Load() (Config, error) {
 	}
 	if err := validateIndexName(cfg.ElasticsearchIndex); err != nil {
 		return Config{}, fmt.Errorf("invalid ELASTICSEARCH_INDEX: %w", err)
+	}
+	if cfg.HTTPAddr == "" {
+		return Config{}, fmt.Errorf("invalid HTTP_ADDR: must not be empty")
 	}
 
 	return cfg, nil
