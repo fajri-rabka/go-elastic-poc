@@ -1,6 +1,6 @@
 ES_URL ?= http://localhost:9200
 
-.PHONY: up down reset logs ps health run tidy
+.PHONY: up down reset logs ps health run demo tidy
 
 up:
 	docker compose up -d
@@ -22,6 +22,9 @@ health:
 
 run:
 	go run ./cmd/api
+
+demo:
+	go run ./cmd/demo
 
 tidy:
 	go mod tidy
