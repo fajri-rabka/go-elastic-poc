@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/fajri-rabka/go-elasticsearch-poc/internal/model"
@@ -24,6 +25,7 @@ type MotorcycleService interface {
 	Get(ctx context.Context, id string) (model.Motorcycle, error)
 	Replace(ctx context.Context, id string, m model.Motorcycle) error
 	Delete(ctx context.Context, id string) error
+	Search(ctx context.Context, filter model.SearchFilter) (model.SearchResult, error)
 }
 
 // MotorcycleHandler routes and handles HTTP requests for motorcycles.
@@ -42,6 +44,7 @@ func NewMotorcycleHandler(svc MotorcycleService, logger *slog.Logger) *Motorcycl
 // RegisterRoutes registers all motorcycle endpoints onto the given ServeMux.
 func (h *MotorcycleHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /motorcycles", h.Create)
+	mux.HandleFunc("GET /motorcycles", h.List)
 	mux.HandleFunc("GET /motorcycles/{id}", h.Get)
 	mux.HandleFunc("PUT /motorcycles/{id}", h.Replace)
 	mux.HandleFunc("DELETE /motorcycles/{id}", h.Delete)
@@ -88,6 +91,20 @@ type motorcycleResponse struct {
 	Description  string `json:"description"`
 }
 
+// listResponse represents the paginated response for GET /motorcycles.
+type listResponse struct {
+	Data       []motorcycleResponse `json:"data"`
+	Pagination paginationResponse   `json:"pagination"`
+}
+
+// paginationResponse provides pagination metadata.
+type paginationResponse struct {
+	Page       int   `json:"page"`
+	Limit      int   `json:"limit"`
+	Total      int64 `json:"total"`
+	TotalPages int   `json:"total_pages"`
+}
+
 // Create handles POST /motorcycles.
 func (h *MotorcycleHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createRequest
@@ -114,6 +131,88 @@ func (h *MotorcycleHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	resp := toResponse(id, m)
 	h.writeJSON(w, http.StatusCreated, resp)
+}
+
+// List handles GET /motorcycles (full-text search, filtering, sorting, pagination).
+func (h *MotorcycleHandler) List(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	filter := model.SearchFilter{
+		Search:       q.Get("search"),
+		Category:     q.Get("category"),
+		Transmission: q.Get("transmission"),
+		Sort:         q.Get("sort"),
+		Page:         1,
+		Limit:        10,
+	}
+
+	if q.Has("available") {
+		b, err := strconv.ParseBool(q.Get("available"))
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "invalid available parameter: must be true or false")
+			return
+		}
+		filter.Available = &b
+	}
+
+	if q.Has("min_price") {
+		v, err := strconv.ParseInt(q.Get("min_price"), 10, 64)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "invalid min_price parameter: must be an integer")
+			return
+		}
+		filter.MinPrice = &v
+	}
+
+	if q.Has("max_price") {
+		v, err := strconv.ParseInt(q.Get("max_price"), 10, 64)
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "invalid max_price parameter: must be an integer")
+			return
+		}
+		filter.MaxPrice = &v
+	}
+
+	if q.Has("page") {
+		p, err := strconv.Atoi(q.Get("page"))
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "invalid page parameter: must be an integer")
+			return
+		}
+		filter.Page = p
+	}
+
+	if q.Has("limit") {
+		l, err := strconv.Atoi(q.Get("limit"))
+		if err != nil {
+			h.writeError(w, http.StatusBadRequest, "invalid limit parameter: must be an integer")
+			return
+		}
+		filter.Limit = l
+	}
+
+	res, err := h.svc.Search(r.Context(), filter)
+	if err != nil {
+		h.handleDomainError(w, err, "search motorcycles")
+		return
+	}
+
+	data := make([]motorcycleResponse, 0, len(res.Items))
+	for _, item := range res.Items {
+		data = append(data, toResponse(item.ID, item.Motorcycle))
+	}
+
+	resp := listResponse{
+		Data: data,
+		Pagination: paginationResponse{
+			Page:       res.Page,
+			Limit:      res.Limit,
+			Total:      res.Total,
+			TotalPages: res.TotalPages,
+		},
+	}
+
+	h.writeJSON(w, http.StatusOK, resp)
 }
 
 // Get handles GET /motorcycles/{id}.
