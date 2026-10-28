@@ -434,4 +434,58 @@ curl -sS "http://localhost:9200/motorcycles/_doc/honda-beat-001?pretty"
 - Jika memang ingin memperbarui data, buat dan gunakan operasi `Update` terpisah dengan payload eksplisit (Phase 4).
 - Jika memang ingin membuat dokumen baru, gunakan identifier `_id` yang berbeda (misal `honda-beat-002`).
 
+---
+
+## 13. Port 8080 already in use (REST API Server)
+
+**Label:** PENCEGAHAN.
+
+**Gejala:** `make run` (`go run ./cmd/api`) gagal dengan error:
+```text
+bind: address already in use
+```
+
+**Penyebab:** Port `8080` sedang digunakan oleh proses lain (misal dev server lain di WSL atau container Docker lain).
+
+**Cara cek:**
+```bash
+ss -ltnp | grep 8080
+# atau
+lsof -i :8080
+```
+
+**Cara fix yang aman:**
+1. Hentikan proses yang sedang memakai port `8080`, ATAU
+2. Jalankan server dengan port lain lewat env var tanpa mengubah source code:
+   ```bash
+   HTTP_ADDR=127.0.0.1:8081 make run
+   ```
+
+---
+
+## 14. HTTP 503 Datastore Service Unavailable
+
+**Label:** TERBUKTI (tertangani secara aman di Phase 4).
+
+**Gejala:** API merespons dengan HTTP status 503:
+```json
+{
+  "error": "datastore service unavailable"
+}
+```
+
+**Penyebab:** Go API tidak dapat menghubungi Elasticsearch (misal container Elasticsearch mati, port forwarding Docker terputus, atau request timeout setelah 10 detik).
+
+**Kenapa ini penting:** Handler mengklasifikasikan error dependency datastore dan mengembalikan HTTP 503 (bukan 500), tanpa membocorkan raw error network/credential ke client publik, sementara error internal dicatat secara terstruktur di `log/slog`.
+
+**Cara cek:**
+```bash
+docker compose ps
+curl http://localhost:9200
+```
+
+**Cara fix yang aman:**
+Nyalakan kembali Elasticsearch (`make up`), pastikan statusnya `healthy`, lalu request API kembali.
+
+
 

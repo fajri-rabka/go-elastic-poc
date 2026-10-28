@@ -3,7 +3,7 @@
 Roadmap ini ditulis berdasarkan **evidence nyata**, bukan asumsi.
 Tiap phase dilengkapi objective, deliverable, definition of done, dan bukti verifikasi runtime.
 
-**Terakhir diperbarui:** 2026-10-29 (Phase 3 — Honda Motorcycle Index & Document selesai dan terbukti).
+**Terakhir diperbarui:** 2026-10-29 (Phase 4 — Motorcycle REST API CRUD selesai dan terbukti).
 
 ## Legenda status
 
@@ -20,7 +20,7 @@ Tiap phase dilengkapi objective, deliverable, definition of done, dan bukti veri
 flowchart LR
     P1["Phase 1: ES Infrastructure<br/>(DONE)"] --> P2["Phase 2: Go Connection<br/>(DONE)"]
     P2 --> P3["Phase 3: Index & Document<br/>(DONE)"]
-    P3 --> P4["Phase 4: CRUD API<br/>(NOT IMPLEMENTED)"]
+    P3 --> P4["Phase 4: CRUD API<br/>(DONE)"]
     P4 --> P5["Phase 5: Search & Filter<br/>(NOT IMPLEMENTED)"]
     P5 --> P6["Phase 6: Final Delivery<br/>(NOT IMPLEMENTED)"]
 ```
@@ -30,7 +30,7 @@ flowchart LR
 | 1 — Elasticsearch Infrastructure | DONE | Docker Compose ES 9.5.5, single-node, cluster green, persistence volume |
 | 2 — Go Connection | DONE | Official Typed Client v9.5.2, `client.Info()` return 9.5.5, error path teruji |
 | 3 — Index & Document | DONE | Index `motorcycles` (1 shard, 0 replica, strict mapping), sample Honda BeAT tersimpan & terbaca, idempotent |
-| 4 — CRUD API | NOT IMPLEMENTED | Direncanakan (HTTP handlers, model mapping, error handling) |
+| 4 — CRUD API | DONE | REST API lengkap (POST, GET, PUT, DELETE, health), Go 1.22+ routing, optimistic locking, 100% test pass |
 | 5 — Elasticsearch Search | NOT IMPLEMENTED | Direncanakan (full-text search, filter, multi-field, pagination) |
 | 6 — Final POC Delivery | NOT IMPLEMENTED | Direncanakan (final review, demo handoff ke Koh Franz) |
 
@@ -193,19 +193,74 @@ flowchart LR
 
 ---
 
-## Phase 4 — CRUD API (Upcoming)
+## Phase 4 — CRUD API (Motorcycle REST API)
 
-**Objective:** Membangun RESTful HTTP API untuk operasi Create, Read, Update, dan Delete data motor di Elasticsearch.
+**Objective:** Membangun RESTful HTTP API untuk operasi Create, Read, Replace (Update), dan Delete data motor Honda di Elasticsearch menggunakan Go standard library `net/http` dan official Typed Client v9.
 
 **Scope:**
-- HTTP handlers (`internal/handler`).
-- Router HTTP (standard library `net/http` servemux Go 1.22+).
-- Repository methods tambahan: `Update`, `Delete`, `List`.
-- Pemetaan HTTP status code (201 Created, 200 OK, 404 Not Found, 409 Conflict, 400 Bad Request).
-- Context propagation dari `r.Context()`.
-- Integration tests untuk endpoint API.
+- HTTP handlers (`internal/handler/motorcycle.go`).
+- Domain business validation service (`internal/service/motorcycle.go`).
+- Repository extensions (`Replace` dengan optimistic concurrency control, `Delete`, `IsUnavailable` check).
+- Standard library routing pattern modern Go 1.22+ (`POST /motorcycles`, `GET /motorcycles/{id}`, `PUT /motorcycles/{id}`, `DELETE /motorcycles/{id}`, `GET /health`).
+- Path parameter reading via `r.PathValue("id")`.
+- Strict JSON decoder (`DisallowUnknownFields()`, 1 MiB body limit, reject trailing objects).
+- Error mapping ke HTTP status code: 201 Created, 200 OK, 204 No Content, 400 Bad Request, 404 Not Found, 409 Conflict, 503 Service Unavailable, 500 Internal Server Error.
+- Graceful shutdown dengan signal trapping (SIGINT, SIGTERM) dan timeouts pada `http.Server`.
+- Standard library `log/slog` untuk internal error logging tanpa membocorkan internal datastore ke client.
+- Entrypoint HTTP server di `cmd/api/main.go` yang dijalankan via `make run`.
+- Konfigurasi `HTTP_ADDR` (default `127.0.0.1:8080`).
 
-**Dependencies:** Phase 3 (DONE).
+**Deliverables:**
+- `internal/handler/motorcycle.go`
+- `internal/handler/motorcycle_test.go`
+- `internal/service/motorcycle.go`
+- `internal/service/motorcycle_test.go`
+- `internal/repository/elastic/motorcycle.go` (ditambahkan method `Replace`, `Delete`, `IsUnavailable`)
+- `internal/config/config.go` (ditambahkan field `HTTPAddr`)
+- `internal/config/config_test.go`
+- `cmd/api/main.go` (diubah menjadi REST API server)
+- `.env.example`
+
+**Definition of Done:**
+- [x] `go test -v ./...` PASS 100% untuk semua package (`config`, `service`, `handler`, `repository/elastic`).
+- [x] `gofmt -l .` bersih, `go vet ./...` dan `go build ./...` exit 0.
+- [x] Server start listening on `127.0.0.1:8080`.
+- [x] `GET /health` return 200 `{"status":"ok"}`.
+- [x] `POST /motorcycles` membuat motor baru (201 Created).
+- [x] `POST /motorcycles` dengan duplicate ID ditolak (409 Conflict).
+- [x] `GET /motorcycles/{id}` mengembalikan data motor (200 OK).
+- [x] `PUT /motorcycles/{id}` melakukan full replacement dengan sequence number verification (200 OK).
+- [x] `PUT /motorcycles/{id}` pada ID yang tidak ada mengembalikan 404 Not Found (mencegah upsert diam-diam).
+- [x] `DELETE /motorcycles/{id}` menghapus motor (204 No Content).
+- [x] `GET /motorcycles/{id}` setelah dihapus mengembalikan 404 Not Found.
+- [x] Format JSON salah atau field brand bukan Honda ditolak (400 Bad Request).
+- [x] Dokumen Phase 3 `honda-beat-001` dan perintah `make demo` tetap utuh dan berfungsi normal.
+
+**Evidence (2026-10-29):**
+1. Test output:
+   ```text
+   PASS: internal/config (TestLoad with 15 test cases)
+   PASS: internal/service (TestValidateID, TestValidateMotorcycle, TestServiceCRUDOperations)
+   PASS: internal/handler (TestHandlerHealth, TestHandlerCreate [7 subtests], TestHandlerGet [3 subtests], TestHandlerReplace [4 subtests], TestHandlerDelete [2 subtests], TestWriteError, TestHandlerUnexpectedInternalError)
+   PASS: internal/repository/elastic (TestMotorcycleMapping, TestMappingProblems, TestHasErrorType)
+   ```
+2. Manual curl test suite:
+   ```text
+   GET /health                            -> 200 OK ({"status":"ok"})
+   POST /motorcycles (honda-scoopy-api-001)-> 201 Created
+   GET /motorcycles/honda-scoopy-api-001  -> 200 OK (price_idr: 22000000)
+   POST duplicate honda-scoopy-api-001    -> 409 Conflict ({"error":"motorcycle already exists"})
+   PUT /motorcycles/honda-scoopy-api-001  -> 200 OK (price_idr updated to 23500000)
+   GET after PUT                          -> 200 OK (price_idr: 23500000 verified)
+   DELETE /motorcycles/honda-scoopy-api-001-> 204 No Content
+   GET after DELETE                       -> 404 Not Found ({"error":"motorcycle not found"})
+   PUT non-existent ID                    -> 404 Not Found (no upsert)
+   POST invalid JSON format               -> 400 Bad Request
+   POST invalid brand "Yamaha"            -> 400 Bad Request ({"error":"brand must be \"Honda\""})
+   GET honda-beat-001 (Phase 3 doc)       -> 200 OK (data aman dan utuh)
+   ```
+3. Phase 3 Demo verification:
+   `make demo` berhasil membaca `honda-beat-001` dengan idempotency verification utuh.
 
 ---
 

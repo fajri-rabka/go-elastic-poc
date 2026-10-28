@@ -5,11 +5,12 @@ The application stores and queries domain data (Honda motorcycle catalog) as JSO
 
 > This project is **not** about logging, Elastic APM, OpenTelemetry, distributed tracing, or Kibana observability.
 
-> **Current status: Phase 3 (Index & Document) — DONE.**
+> **Current status: Phase 4 (Motorcycle REST API CRUD) — DONE.**
 > - **Phase 1 (Infra):** Elasticsearch 9.5.5 single-node cluster via Docker Compose with persistent named volume and healthcheck.
 > - **Phase 2 (Connection):** Official Elasticsearch Go Typed Client v9 (`github.com/elastic/go-elasticsearch/v9`).
-> - **Phase 3 (Index & Document):** Index `motorcycles` with explicit strict mapping, `Motorcycle` domain model, deterministic Honda BeAT document insertion, real-time GET by ID, and verified idempotency.
-> - HTTP API and search queries arrive in subsequent phases.
+> - **Phase 3 (Index & Document):** Index `motorcycles` with explicit strict mapping, `Motorcycle` domain model, sample Honda BeAT document, real-time GET by ID, and verified idempotency.
+> - **Phase 4 (REST API CRUD):** Full HTTP REST API (`net/http`, Go 1.22+ routing) covering Create (POST), Read (GET), Replace (PUT), Delete (DELETE), and Health check, backed by optimistic concurrency control and strict business validation.
+> - Search and filtering arrive in Phase 5.
 >
 > Complete progress, architecture details, and verification evidence: [docs/ROADMAP.md](docs/ROADMAP.md).
 
@@ -33,7 +34,10 @@ The application stores and queries domain data (Honda motorcycle catalog) as JSO
 HTTP Client / Postman
         |
         v
-     Go API (cmd/api, internal/handler)
+     Go API (cmd/api)
+        |
+        v
+     Handler (internal/handler)
         |
         v
      Service (internal/service)
@@ -45,23 +49,19 @@ HTTP Client / Postman
   Elasticsearch (motorcycles index)
         |
         v
-   JSON Document (Honda BeAT)
+   JSON Document (Honda catalog)
 ```
 
-**Implemented in Phase 3:**
+**Implemented in Phase 4:**
 
 ```text
-Demo Runner (cmd/demo/main.go)
-        |
-        v
-  Config (internal/config)
-        |
-        v
-  Official Typed Client (internal/repository/elastic)
-        |
-        +---> EnsureIndex()  --> PUT /motorcycles (explicit strict mapping, 1 shard, 0 replica)
-        +---> Create()       --> PUT /motorcycles/_create/honda-beat-001 (conflict protected)
-        +---> Get()          --> GET /motorcycles/_doc/honda-beat-001 (real-time read)
+HTTP Client / curl / Postman
+  │
+  ├── GET    /health           --> 200 {"status":"ok"}
+  ├── POST   /motorcycles      --> 201 Created (validates brand=Honda, unique ID, stores doc)
+  ├── GET    /motorcycles/{id} --> 200 OK (real-time read by _id)
+  ├── PUT    /motorcycles/{id} --> 200 OK (full replacement with optimistic concurrency lock)
+  └── DELETE /motorcycles/{id} --> 204 No Content (removes doc by _id)
 ```
 
 ### Repository Layout
@@ -69,23 +69,27 @@ Demo Runner (cmd/demo/main.go)
 ```text
 .
 ├── cmd/
-│   ├── api/main.go                    # Entrypoint: Phase 2 connection check
-│   └── demo/main.go                   # Entrypoint: Phase 3 index & document demo
+│   ├── api/main.go                    # Entrypoint: Phase 4 REST API server (make run)
+│   └── demo/main.go                   # Entrypoint: Phase 3 index & document demo (make demo)
 ├── internal/
 │   ├── config/
-│   │   ├── config.go                  # Env-based configuration & index validation
+│   │   ├── config.go                  # Configuration (ES URL, index, HTTP addr) & index validator
 │   │   └── config_test.go             # Unit tests for config loading & validation
+│   ├── handler/
+│   │   ├── motorcycle.go              # HTTP handlers, strict JSON decoder, status mapper
+│   │   └── motorcycle_test.go         # HTTP endpoint tests with net/http/httptest
 │   ├── model/
 │   │   └── motorcycle.go              # Domain model & JSON tags
 │   ├── repository/elastic/
 │   │   ├── client.go                  # Elasticsearch Typed Client constructor
-│   │   ├── motorcycle.go              # EnsureIndex, Create, and Get implementations
-│   │   └── motorcycle_test.go         # Unit tests for mapping & error handling
-│   ├── handler/                       # HTTP handlers (reserved for Phase 4)
-│   └── service/                       # Business logic (reserved for Phase 4)
+│   │   ├── motorcycle.go              # EnsureIndex, Create, Get, Replace, Delete operations
+│   │   └── motorcycle_test.go         # Mapping & error type unit tests
+│   └── service/
+│       ├── motorcycle.go              # Business validation rules & repository coordinator
+│       └── motorcycle_test.go         # Unit tests for domain business logic
 ├── docs/
-│   ├── LEARNING_GUIDE.md              # Concepts & technical explanations
-│   ├── ROADMAP.md                     # Phase tracker & runtime evidence
+│   ├── LEARNING_GUIDE.md              # Technical explanations & 20 core concepts
+│   ├── ROADMAP.md                     # Phase tracker & runtime evidence logs
 │   └── TROUBLESHOOTING.md             # Common issues & step-by-step solutions
 ├── compose.yml                        # Elasticsearch 9.5.5 single-node setup
 ├── Makefile                           # Development task shortcuts
@@ -122,74 +126,67 @@ make ps
 # or: docker compose ps
 ```
 
-### 2. Verify Connection (Phase 2)
+### 2. Start REST API Server (Phase 4)
 
 ```bash
 make run
 # or: go run ./cmd/api
 ```
 
-Expected output:
-```text
-Elasticsearch connected
-Cluster : docker-cluster
-Version : 9.5.5
+The server starts and listens on `http://127.0.0.1:8080` (configured via `HTTP_ADDR`).
+On startup, it verifies connectivity to Elasticsearch and ensures the `motorcycles` index is ready.
+Press `Ctrl+C` for graceful shutdown.
+
+### 3. Test REST API Endpoints
+
+```bash
+# Health check
+curl -i http://127.0.0.1:8080/health
+
+# Create a new Honda motorcycle
+curl -i -X POST http://127.0.0.1:8080/motorcycles \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "honda-scoopy-api-001",
+    "brand": "Honda",
+    "model_name": "Scoopy",
+    "category": "matic",
+    "engine_cc": 110,
+    "transmission": "automatic",
+    "price_idr": 22000000,
+    "available": true,
+    "description": "Motor matic Honda untuk kebutuhan harian"
+  }'
+
+# Read motorcycle by ID
+curl -i http://127.0.0.1:8080/motorcycles/honda-scoopy-api-001
+
+# Full replacement (PUT)
+curl -i -X PUT http://127.0.0.1:8080/motorcycles/honda-scoopy-api-001 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "brand": "Honda",
+    "model_name": "Scoopy Prestige",
+    "category": "matic",
+    "engine_cc": 110,
+    "transmission": "automatic",
+    "price_idr": 23500000,
+    "available": true,
+    "description": "Motor matic Honda edisi Prestige"
+  }'
+
+# Delete motorcycle
+curl -i -X DELETE http://127.0.0.1:8080/motorcycles/honda-scoopy-api-001
 ```
 
-### 3. Run Phase 3 Demo (Index & Document)
+### 4. Run Phase 3 Demo (Index & Document Verification)
 
 ```bash
 make demo
 # or: go run ./cmd/demo
 ```
 
-Expected output:
-```text
-Elasticsearch connected
-Cluster : docker-cluster
-Version : 9.5.5
-
-Index  : motorcycles
-Status : created (1 shard, 0 replicas, explicit mapping)
-
-Motorcycle saved
-ID     : honda-beat-001
-Model  : Honda BeAT
-
-Motorcycle fetched successfully (GET by ID)
-Brand        : Honda
-Model        : BeAT
-Category     : matic
-Engine (cc)  : 110
-Transmission : automatic
-Price (IDR)  : 19000000
-Available    : true
-Check        : stored document matches the sample
-```
-
-Run `make demo` a second time to verify **idempotency**:
-```text
-Index  : motorcycles
-Status : already exists, mapping verified
-
-Motorcycle already exists, left unchanged
-ID     : honda-beat-001
-Model  : Honda BeAT
-...
-```
-
-### 4. Manual Verification via curl
-
-```bash
-# Check index status and doc count
-curl "http://localhost:9200/_cat/indices?v"
-
-# Inspect explicit mapping
-curl "http://localhost:9200/motorcycles/_mapping?pretty"
-
-# Inspect stored document by ID
-curl "http://localhost:9200/motorcycles/_doc/honda-beat-001?pretty"
-```
+Verifies the deterministic sample document `honda-beat-001` without affecting API runtime.
 
 ---
 
@@ -201,6 +198,7 @@ Configuration is loaded from environment variables only; `.env` files are not au
 |---|---|---|
 | `ELASTICSEARCH_URL` | `http://localhost:9200` | Elasticsearch HTTP endpoint (must be a valid `http`/`https` URL) |
 | `ELASTICSEARCH_INDEX` | `motorcycles` | Target index name (validated against Elasticsearch naming rules) |
+| `HTTP_ADDR` | `127.0.0.1:8080` | Local HTTP server bind address and port |
 
 Override example:
 

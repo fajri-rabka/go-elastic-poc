@@ -3,9 +3,10 @@
 Dokumen ini buat dibaca ulang kapan aja tanpa harus buka history chat.
 Fokusnya: ngerti **apa yang sudah ada di repo**, **kenapa dibikin begitu**, dan **konsep Elasticsearch yang beneran kepakai** di project ini.
 
-> Status repo saat ini: **Phase 3 (Index & Document) SUDAH SELESAI**.
-> Kita sudah punya index `motorcycles` dengan explicit mapping strict, model data `Motorcycle`, dan sample document Honda BeAT (`honda-beat-001`).
-> Unit test sudah aktif dan lulus. Lihat [ROADMAP.md](ROADMAP.md) untuk detail status dan evidence.
+> Status repo saat ini: **Phase 4 (Motorcycle REST API CRUD) SUDAH SELESAI**.
+> Aplikasi sudah memiliki REST API lengkap (POST, GET, PUT, DELETE, health check) dengan pemisahan layer Handler → Service → Repository → Elasticsearch.
+> Server berjalan via `make run` (`cmd/api`) dan demo Phase 3 tetap dapat dijalankan via `make demo`.
+> Seluruh unit test (config, service, handler, elastic) aktif dan lulus 100%. Lihat [ROADMAP.md](ROADMAP.md) untuk detail status dan evidence.
 
 ---
 
@@ -546,5 +547,167 @@ Di Phase 3 ini, kita beneran nyimpen data katalog motor Honda ke Elasticsearch p
   ```
 - **Alasan teknis:** Dengan menangkap conflict exception ini, kita bisa mengetahui dengan pasti bahwa dokumen sudah ada tanpa menimpanya secara diam-diam.
 - **Concern junior:** Kalau lu butuh update data, buat fungsi `Update` yang eksplisit, jangan pakai `Index` sembarangan agar data yang lama tidak tertimpa tanpa disadari.
+
+---
+
+## 20. Pembelajaran Phase 4 — Motorcycle REST API CRUD
+
+Di Phase 4, kita membangun HTTP REST API sungguhan di atas Elasticsearch. Arsitekturnya mengikuti prinsip **Separation of Concerns**:
+`HTTP Client → Handler → Service → Repository → Elasticsearch`.
+
+Berikut 12 konsep penting Phase 4 yang wajib dipahami junior developer:
+
+### 1. Apa itu REST API?
+- **Pengertian:** Gaya arsitektur komunikasi sistem berbasis web yang memanfaatkan protokol HTTP dan method standar (`GET`, `POST`, `PUT`, `DELETE`) untuk memanipulasi resource (dalam hal ini resource: `motorcycles`).
+- **Contoh di project:**
+  - `POST /motorcycles` untuk menambah motor baru.
+  - `GET /motorcycles/{id}` untuk membaca detail motor.
+  - `PUT /motorcycles/{id}` untuk mengganti data motor secara utuh.
+  - `DELETE /motorcycles/{id}` untuk menghapus motor.
+- **Alasan teknis:** Format RESTful memudahkan integrasi dengan frontend, mobile app, maupun client lain (curl, Postman) karena menggunakan standar HTTP yang universal dan stateless.
+- **Concern junior:** Jangan bikin endpoint gaya RPC seperti `POST /createMotorcycle` atau `POST /deleteMotorcycleById`. Gunakan kata benda jamak (`/motorcycles`) dan bedakan aksinya lewat HTTP method.
+
+### 2. Apa itu HTTP Handler?
+- **Pengertian:** Komponen aplikasi yang bertugas menerima HTTP request, membaca header/path parameter/query/body JSON, memanggil layer service, dan menulis HTTP response (status code & JSON).
+- **Contoh di project:** `internal/handler/motorcycle.go` (`MotorcycleHandler`).
+- **Alasan teknis:** Handler adalah pintu masuk HTTP. Handler tidak boleh mengurusi query Elasticsearch langsung ataupun aturan validasi domain bisnis yang rumit. Tugasnya hanya menerjemahkan dunia HTTP ke dunia domain Go.
+- **Concern junior:** Jangan biarkan handler memuat business logic. Kalau handler lu ratusan baris isinya query dan perhitungan rumus, itu tanda kode mulai bau (*code smell*). Pindahkan ke Service.
+
+### 3. Apa fungsi Service Layer?
+- **Pengertian:** Lapisan inti yang mengisolasi business logic dan aturan domain aplikasi dari detail teknis HTTP maupun database.
+- **Contoh di project:** `internal/service/motorcycle.go` (`MotorcycleService`).
+- **Alasan teknis:** Service memastikan bahwa data motor yang masuk mematuhi aturan: brand harus "Honda", harga harus positif, kapasitas cc harus lebih dari 0, dan ID harus berformat slug yang rapi. Service tidak peduli apakah data itu datang dari HTTP JSON, gRPC, atau CLI.
+- **Concern junior:** Jangan buat service yang cuma jadi "penerus kosong" (*pass-through*) kalau nggak ada logic. Tapi begitu ada validasi bisnis, taruh di Service agar bisa di-unit test secara independen tanpa perlu HTTP server.
+
+### 4. Apa fungsi Repository?
+- **Pengertian:** Lapisan abstraksi penyimpanan data. Mengisolasi cara data disimpan, diambil, dan diubah di datastore.
+- **Contoh di project:** `internal/repository/elastic/motorcycle.go` (`MotorcycleRepository`).
+- **Alasan teknis:** Semua sintaks spesifik Elasticsearch (Typed API `r.client.Index`, `r.client.Get`, `r.client.Delete`, mapping, optimistic concurrency `IfSeqNo`) terkonsentrasi di sini. Jika di masa depan library atau konfigurasi Elasticsearch berubah, layer Service dan Handler tidak perlu dirombak.
+- **Concern junior:** Repository tidak boleh mengurusi HTTP status code (misal menulis 404). Repository hanya mengembalikan domain error (`ErrNotFound`, `ErrConflict`, `ErrAlreadyExists`), lalu Handler yang menerjemahkannya ke HTTP status.
+
+### 5. Apa bedanya POST dan PUT?
+- **Pengertian:**
+  - `POST /motorcycles`: Membuat resource baru. Tidak idempotent jika tanpa proteksi ID unik. Di project kita, jika ID sudah ada, POST mengembalikan HTTP 409 Conflict.
+  - `PUT /motorcycles/{id}`: Mengganti resource yang sudah ada secara **penuh (full replacement)**. Bersifat idempotent: jika dikirim ulang dengan payload yang sama, kondisi akhir resource tetap sama.
+- **Contoh di project:**
+  - POST menyertakan transport field `id` di body JSON untuk create motor baru: `honda-scoopy-api-001`.
+  - PUT membaca `id` dari path URL dan mengganti seluruh isi field motor tersebut dengan data baru.
+- **Alasan teknis:** Di Elasticsearch, operasi Index standar (`PUT /index/_doc/id`) secara default bertindak sebagai *upsert* (kalau belum ada dibuatkan baru). Di REST API kita, kita **tidak ingin PUT melakukan upsert diam-diam**, sehingga kita memeriksa keberadaan dokumen terlebih dahulu.
+- **Concern junior:** Jangan gunakan PUT untuk "partial update" (cuma update 1-2 field). Kalau mau partial update, di REST standar itu tugasnya `PATCH`. PUT mengharuskan client mengirimkan seluruh field secara lengkap.
+
+### 6. Apa itu CRUD?
+- **Pengertian:** Akronim dari Create, Read, Update, Delete — empat operasi dasar manipulasi data pada penyimpanan persistent.
+- **Contoh di project:**
+  - **C**reate: `POST /motorcycles`
+  - **R**ead: `GET /motorcycles/{id}`
+  - **U**pdate: `PUT /motorcycles/{id}`
+  - **D**elete: `DELETE /motorcycles/{id}`
+- **Alasan teknis:** CRUD adalah fondasi sebelum kita masuk ke fitur yang lebih kompleks seperti search, filter, facet, dan aggregations di Phase 5.
+- **Concern junior:** CRUD di Elasticsearch punya karakteristik khusus dibanding RDBMS: ada konsep *near-real-time* untuk search, namun GET by ID selalu bersifat real-time.
+
+### 7. Kenapa ID tidak disimpan dua kali?
+- **Pengertian:** Document ID Elasticsearch (`_id`) adalah primary key. Di dalam payload JSON asli (`_source`), kita tidak menyertakan field `"id": "..."`.
+- **Contoh di project:**
+  - Struct `model.Motorcycle` tidak punya field `ID`.
+  - Saat client melakukan `POST /motorcycles`, field `id` di JSON body diambil oleh Handler untuk dijadikan path parameter `_id` Elasticsearch, sementara payload yang di-index hanya struct `Motorcycle`.
+  - Saat client melakukan `GET /motorcycles/{id}`, response DTO menggabungkan kembali `_id` dengan data `Motorcycle`.
+- **Alasan teknis:** Menyimpan ID di dalam `_source` dan di `_id` menyebabkan duplikasi data yang rentan terhadap *data drift* (misal ID di URL diubah tapi isi dokumen tidak sinkron).
+- **Concern junior:** Jangan tergoda menambahkan tag `json:"id"` di domain model jika database lu sudah mengelola ID di level metadata dokumen.
+
+### 8. Kenapa perlu Validation di dua level?
+- **Pengertian:**
+  - **Format HTTP Validation (Handler):** Validasi sintaks JSON, body size limit (1 MiB), unknown fields rejection (`DisallowUnknownFields()`), dan kelengkapan field wajib (apakah field `available` ada nilainya atau nil).
+  - **Domain Business Validation (Service):** Validasi logika aturan bisnis (apakah brand adalah "Honda", apakah cc > 0, apakah harga > 0, apakah format slug ID valid).
+- **Contoh di project:**
+  - Jika client mengirim payload `{"brand": "Honda", "extra_prop": 123}`, ditolak oleh Handler (400 Bad Request: unknown field).
+  - Jika client mengirim `{"id": "scoopy-001", "brand": "Yamaha", ...}`, ditolak oleh Service (400 Bad Request: brand must be "Honda").
+- **Alasan teknis:** Menjaga sistem tetap aman (*defense in depth*) dan memberikan pesan error yang jelas dan spesifik kepada pengguna API sebelum query dikirim ke datastore.
+- **Concern junior:** Khusus tipe boolean seperti `available: false`, jika di Go didefinisikan sebagai `bool` biasa (bukan pointer `*bool`), JSON decoder akan mengisinya dengan default `false` jika field tidak dikirim. Menggunakan pointer `*bool` pada DTO request memungkinkan kita membedakan antara "field tidak dikirim" vs "field bernilai false".
+
+### 9. Kenapa HTTP 404 dan 409 berbeda?
+- **Pengertian:**
+  - `404 Not Found`: Target resource yang diminta tidak ada di sistem.
+  - `409 Conflict`: Request tidak bisa diproses karena terjadi benturan status pada resource (misal ID sudah ada pada Create, atau versi dokumen sudah berubah saat concurrent Update).
+- **Contoh di project:**
+  - Memanggil `GET /motorcycles/honda-ghost-999` menghasilkan **404**.
+  - Memanggil `POST /motorcycles` dengan ID yang sudah ada (`honda-beat-001`) menghasilkan **409 Conflict** (`motorcycle already exists`).
+  - Memanggil `PUT /motorcycles/{id}` saat ada proses lain yang mendahului update menghasilkan **409 Conflict** (`document version conflict`).
+- **Alasan teknis:** Status code yang presisi mempermudah client API (frontend/mobile) menentukan tindakan: apakah harus menampilkan halaman "Data Tidak Ditemukan" (404) atau memberi notifikasi "Data Sudah Ada / Terjadi Benturan" (409).
+- **Concern junior:** Jangan memukul rata semua error menjadi 400 Bad Request atau 500 Internal Server Error.
+
+### 10. Apa itu Optimistic Concurrency Control?
+- **Pengertian:** Pola penanganan modifikasi data bersamaan tanpa melakukan penguncian (*locking*) tabel/dokumen. Sistem mengecek apakah dokumen telah berubah sejak terakhir kali dibaca sebelum menyimpan perubahan baru.
+- **Contoh di project:**
+  Saat `PUT /motorcycles/{id}` dipanggil:
+  1. Service membaca dokumen via GET dan memperoleh metadata `_seq_no` dan `_primary_term`.
+  2. Saat menulis update via Typed API Index, kita sertakan parameter:
+     ```go
+     r.client.Index(r.index).
+         Id(id).
+         IfSeqNo(strconv.FormatInt(*getRes.SeqNo_, 10)).
+         IfPrimaryTerm(strconv.FormatInt(*getRes.PrimaryTerm_, 10)).
+         Document(m)
+     ```
+  3. Jika ada request concurrent lain yang mengubah dokumen tersebut di antara langkah 1 dan 2, `_seq_no` di Elasticsearch akan naik, dan request kita otomatis ditolak dengan `version_conflict_engine_exception` -> kita petakan ke HTTP 409 Conflict!
+- **Alasan teknis:** Elasticsearch didesain terdistribusi dan non-blocking. Optimistic locking berbasis Sequence Number dan Primary Term adalah standar resmi Elasticsearch untuk mencegah *lost updates*.
+- **Concern junior:** Jangan mematikan pengecekan ini di production. Kalau dimatikan, dua user yang mengedit motor bersamaan akan saling menimpa data tanpa peringatan.
+
+### 11. Bagaimana Request Context diteruskan ke Elasticsearch?
+- **Pengertian:** Mengalirkan `r.Context()` dari HTTP request handler ke Service, lalu ke method Typed Client `.Do(ctx)`.
+- **Contoh di project:**
+  ```go
+  // Di Handler:
+  h.svc.Get(r.Context(), id)
+
+  // Di Repository:
+  r.client.Get(r.index, id).Do(ctx)
+  ```
+- **Alasan teknis:** Jika client HTTP menutup browser, memutus koneksi Postman, atau timeout terjadi di level web server, context akan otomatis di-cancel (`ctx.Done()`). Elasticsearch client yang mendengarkan context tersebut akan segera membatalkan query dan membebaskan koneksi TCP/socket, mencegah pemborosan resource backend.
+- **Concern junior:** Jangan pernah membuat `context.Background()` baru di dalam handler untuk query database! Selalu teruskan `r.Context()`.
+
+### 12. Cara Pengujian dengan Postman atau curl
+
+Berikut contoh nyata perintah `curl` untuk menguji API kita:
+
+```bash
+# 1. Health check
+curl -i http://127.0.0.1:8080/health
+
+# 2. Create motorcycle baru (POST)
+curl -i -X POST http://127.0.0.1:8080/motorcycles \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "honda-scoopy-api-001",
+    "brand": "Honda",
+    "model_name": "Scoopy",
+    "category": "matic",
+    "engine_cc": 110,
+    "transmission": "automatic",
+    "price_idr": 22000000,
+    "available": true,
+    "description": "Motor matic Honda untuk kebutuhan harian"
+  }'
+
+# 3. Read motorcycle (GET)
+curl -i http://127.0.0.1:8080/motorcycles/honda-scoopy-api-001
+
+# 4. Update motorcycle full replacement (PUT)
+curl -i -X PUT http://127.0.0.1:8080/motorcycles/honda-scoopy-api-001 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "brand": "Honda",
+    "model_name": "Scoopy Prestige",
+    "category": "matic",
+    "engine_cc": 110,
+    "transmission": "automatic",
+    "price_idr": 23500000,
+    "available": true,
+    "description": "Motor matic Honda edisi Prestige"
+  }'
+
+# 5. Delete motorcycle (DELETE)
+curl -i -X DELETE http://127.0.0.1:8080/motorcycles/honda-scoopy-api-001
+```
+
 
 
