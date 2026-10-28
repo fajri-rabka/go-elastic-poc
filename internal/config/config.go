@@ -10,7 +10,10 @@ import (
 
 const (
 	defaultElasticsearchURL   = "http://localhost:9200"
-	defaultElasticsearchIndex = "products"
+	defaultElasticsearchIndex = "motorcycles"
+
+	// Elasticsearch rejects index names longer than 255 bytes.
+	maxIndexNameBytes = 255
 )
 
 type Config struct {
@@ -19,7 +22,8 @@ type Config struct {
 }
 
 // Load reads configuration from the environment. Unset variables fall back to
-// local development defaults; variables set to an empty value are rejected.
+// local development defaults. Values that are set are trimmed and validated,
+// so an empty or malformed value is rejected instead of silently replaced.
 func Load() (Config, error) {
 	cfg := Config{
 		ElasticsearchURL:   envOrDefault("ELASTICSEARCH_URL", defaultElasticsearchURL),
@@ -28,6 +32,9 @@ func Load() (Config, error) {
 
 	if err := validateElasticsearchURL(cfg.ElasticsearchURL); err != nil {
 		return Config{}, fmt.Errorf("invalid ELASTICSEARCH_URL: %w", err)
+	}
+	if err := validateIndexName(cfg.ElasticsearchIndex); err != nil {
+		return Config{}, fmt.Errorf("invalid ELASTICSEARCH_INDEX: %w", err)
 	}
 
 	return cfg, nil
@@ -55,6 +62,28 @@ func validateElasticsearchURL(raw string) error {
 	}
 	if u.Host == "" {
 		return fmt.Errorf("%q must include a host", raw)
+	}
+
+	return nil
+}
+
+// validateIndexName checks the Elasticsearch index naming rules that a
+// hand-written config value can realistically break. Failing here gives a
+// clear startup error instead of an invalid_index_name_exception later.
+func validateIndexName(name string) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("must not be empty")
+	case name == "." || name == "..":
+		return fmt.Errorf("%q is not allowed", name)
+	case len(name) > maxIndexNameBytes:
+		return fmt.Errorf("%q must not be longer than %d bytes", name, maxIndexNameBytes)
+	case name != strings.ToLower(name):
+		return fmt.Errorf("%q must be lowercase", name)
+	case strings.ContainsAny(name[:1], "-_+"):
+		return fmt.Errorf("%q must not start with '-', '_' or '+'", name)
+	case strings.ContainsAny(name, `\/*?"<>| ,#:`):
+		return fmt.Errorf(`%q must not contain \ / * ? " < > | space , # or :`, name)
 	}
 
 	return nil
