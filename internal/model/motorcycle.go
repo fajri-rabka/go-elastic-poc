@@ -18,3 +18,31 @@ type Motorcycle struct {
 	Available    bool   `json:"available"`
 	Description  string `json:"description"`
 }
+
+// MotorcycleWithID pairs a Motorcycle domain model with its document _id.
+type MotorcycleWithID struct {
+	ID string
+	Motorcycle
+}
+
+// SearchFilter specifies criteria for searching, filtering, sorting, and paginating motorcycles.
+type SearchFilter struct {
+	Search       string
+	Category     string
+	Transmission string
+	Available    *bool
+	MinPrice     *int64
+	MaxPrice     *int64
+	Sort         string
+	Page         int
+	Limit        int
+}
+
+// SearchResult contains the paginated items and hit counts from a search.
+type SearchResult struct {
+	Items      []MotorcycleWithID
+	Total      int64
+	Page       int
+	Limit      int
+	TotalPages int
+}
