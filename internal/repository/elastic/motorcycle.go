@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/esdsl"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types"
 	"github.com/elastic/go-elasticsearch/v9/typedapi/types/enums/dynamicmapping"
+	"github.com/elastic/go-elasticsearch/v9/typedapi/types/enums/result"
 
 	"github.com/fajri-rabka/go-elasticsearch-poc/internal/model"
 )
@@ -22,6 +25,8 @@ var (
 	ErrAlreadyExists = errors.New("document already exists")
 	// ErrNotFound means no document exists for the requested _id.
 	ErrNotFound = errors.New("document not found")
+	// ErrConflict means a concurrent update changed the document before this operation could finish.
+	ErrConflict = errors.New("document version conflict")
 )
 
 // MotorcycleRepository stores motorcycles as documents in a single index.
@@ -90,6 +95,72 @@ func (r *MotorcycleRepository) Get(ctx context.Context, id string) (model.Motorc
 	}
 
 	return m, nil
+}
+
+// Replace performs a full document replacement for an existing motorcycle.
+// It verifies the document exists first and uses Elasticsearch optimistic
+// concurrency control (if_seq_no and if_primary_term) to ensure no accidental
+// upsert happens and concurrent writes are rejected with ErrConflict.
+func (r *MotorcycleRepository) Replace(ctx context.Context, id string, m model.Motorcycle) error {
+	getRes, err := r.client.Get(r.index, id).Do(ctx)
+	if err != nil {
+		return fmt.Errorf("check existing motorcycle %q for replacement: %w", id, err)
+	}
+	if !getRes.Found {
+		return fmt.Errorf("replace motorcycle %q: %w", id, ErrNotFound)
+	}
+	if getRes.SeqNo_ == nil || getRes.PrimaryTerm_ == nil {
+		return fmt.Errorf("replace motorcycle %q: missing sequence number or primary term", id)
+	}
+
+	_, err = r.client.Index(r.index).
+		Id(id).
+		IfSeqNo(strconv.FormatInt(*getRes.SeqNo_, 10)).
+		IfPrimaryTerm(strconv.FormatInt(*getRes.PrimaryTerm_, 10)).
+		Document(m).
+		Do(ctx)
+	if err != nil {
+		if hasErrorType(err, "version_conflict_engine_exception") {
+			return fmt.Errorf("replace motorcycle %q: %w", id, ErrConflict)
+		}
+		return fmt.Errorf("replace motorcycle %q: %w", id, err)
+	}
+
+	return nil
+}
+
+// Delete removes the document with the given id. If the document does not exist,
+// it returns ErrNotFound.
+func (r *MotorcycleRepository) Delete(ctx context.Context, id string) error {
+	res, err := r.client.Delete(r.index, id).Do(ctx)
+	if err != nil {
+		return fmt.Errorf("delete motorcycle %q: %w", id, err)
+	}
+	if res.Result == result.Notfound || res.Result.String() == "not_found" {
+		return fmt.Errorf("delete motorcycle %q: %w", id, ErrNotFound)
+	}
+
+	return nil
+}
+
+// IsUnavailable reports whether an error indicates that the datastore cannot
+// be reached or timed out, representing a dependency failure (HTTP 503).
+func IsUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var esErr *types.ElasticsearchError
+	if errors.As(err, &esErr) {
+		return esErr.Status == 502 || esErr.Status == 503 || esErr.Status == 504
+	}
+	return false
 }
 
 func (r *MotorcycleRepository) verifyMapping(ctx context.Context) error {
