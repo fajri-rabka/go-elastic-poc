@@ -14,6 +14,7 @@ type fakeRepo struct {
 	getFunc     func(ctx context.Context, id string) (model.Motorcycle, error)
 	replaceFunc func(ctx context.Context, id string, m model.Motorcycle) error
 	deleteFunc  func(ctx context.Context, id string) error
+	searchFunc  func(ctx context.Context, filter model.SearchFilter) (model.SearchResult, error)
 }
 
 func (f *fakeRepo) Create(ctx context.Context, id string, m model.Motorcycle) error {
@@ -42,6 +43,13 @@ func (f *fakeRepo) Delete(ctx context.Context, id string) error {
 		return f.deleteFunc(ctx, id)
 	}
 	return nil
+}
+
+func (f *fakeRepo) Search(ctx context.Context, filter model.SearchFilter) (model.SearchResult, error) {
+	if f.searchFunc != nil {
+		return f.searchFunc(ctx, filter)
+	}
+	return model.SearchResult{}, nil
 }
 
 func validMotorcycle() model.Motorcycle {
@@ -266,6 +274,222 @@ func TestServiceCRUDOperations(t *testing.T) {
 		}
 		if !called {
 			t.Errorf("expected repo.Delete to be called")
+		}
+	})
+}
+
+func TestValidateSearchFilter(t *testing.T) {
+	svc := NewMotorcycleService(&fakeRepo{})
+
+	int64Ptr := func(v int64) *int64 { return &v }
+
+	tests := []struct {
+		name     string
+		filter   model.SearchFilter
+		wantErr  string
+		wantSort string
+	}{
+		{
+			name: "valid default without search defaults to name_asc",
+			filter: model.SearchFilter{
+				Page:  1,
+				Limit: 10,
+			},
+			wantSort: "name_asc",
+		},
+		{
+			name: "valid with search defaults to relevance",
+			filter: model.SearchFilter{
+				Search: "beat",
+				Page:   1,
+				Limit:  10,
+			},
+			wantSort: "relevance",
+		},
+		{
+			name: "valid explicit sort",
+			filter: model.SearchFilter{
+				Sort:  "price_desc",
+				Page:  1,
+				Limit: 10,
+			},
+			wantSort: "price_desc",
+		},
+		{
+			name: "relevance sort without search query fails",
+			filter: model.SearchFilter{
+				Sort:  "relevance",
+				Page:  1,
+				Limit: 10,
+			},
+			wantErr: "sort=relevance is only valid when a search query is provided",
+		},
+		{
+			name: "invalid sort option fails",
+			filter: model.SearchFilter{
+				Sort:  "speed_asc",
+				Page:  1,
+				Limit: 10,
+			},
+			wantErr: "invalid sort option",
+		},
+		{
+			name: "negative min_price fails",
+			filter: model.SearchFilter{
+				MinPrice: int64Ptr(-1),
+				Page:     1,
+				Limit:    10,
+			},
+			wantErr: "min_price must be greater than or equal to 0",
+		},
+		{
+			name: "negative max_price fails",
+			filter: model.SearchFilter{
+				MaxPrice: int64Ptr(-100),
+				Page:     1,
+				Limit:    10,
+			},
+			wantErr: "max_price must be greater than or equal to 0",
+		},
+		{
+			name: "min_price greater than max_price fails",
+			filter: model.SearchFilter{
+				MinPrice: int64Ptr(30_000_000),
+				MaxPrice: int64Ptr(20_000_000),
+				Page:     1,
+				Limit:    10,
+			},
+			wantErr: "min_price cannot be greater than max_price",
+		},
+		{
+			name: "page 0 fails",
+			filter: model.SearchFilter{
+				Page:  0,
+				Limit: 10,
+			},
+			wantErr: "page must be greater than or equal to 1",
+		},
+		{
+			name: "negative page fails",
+			filter: model.SearchFilter{
+				Page:  -5,
+				Limit: 10,
+			},
+			wantErr: "page must be greater than or equal to 1",
+		},
+		{
+			name: "limit 0 fails",
+			filter: model.SearchFilter{
+				Page:  1,
+				Limit: 0,
+			},
+			wantErr: "limit must be between 1 and 50",
+		},
+		{
+			name: "limit greater than 50 fails",
+			filter: model.SearchFilter{
+				Page:  1,
+				Limit: 51,
+			},
+			wantErr: "limit must be between 1 and 50",
+		},
+		{
+			name: "result window exceeds 10000 fails",
+			filter: model.SearchFilter{
+				Page:  1001,
+				Limit: 10,
+			},
+			wantErr: "page offset and limit exceed maximum result window of 10000",
+		},
+		{
+			name: "result window boundary 10000 succeeds",
+			filter: model.SearchFilter{
+				Page:  200,
+				Limit: 50,
+			},
+			wantSort: "name_asc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := tt.filter
+			err := svc.ValidateSearchFilter(&f)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ValidateSearchFilter() error = %v, want error containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantSort != "" && f.Sort != tt.wantSort {
+				t.Errorf("got sort %q, want %q", f.Sort, tt.wantSort)
+			}
+		})
+	}
+}
+
+func TestServiceSearchOperation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Search calls repo on valid filter", func(t *testing.T) {
+		called := false
+		svc := NewMotorcycleService(&fakeRepo{
+			searchFunc: func(ctx context.Context, filter model.SearchFilter) (model.SearchResult, error) {
+				called = true
+				if filter.Sort != "price_desc" {
+					t.Errorf("got sort %q, want %q", filter.Sort, "price_desc")
+				}
+				return model.SearchResult{
+					Items: []model.MotorcycleWithID{
+						{ID: "honda-beat-001", Motorcycle: validMotorcycle()},
+					},
+					Total:      1,
+					Page:       1,
+					Limit:      10,
+					TotalPages: 1,
+				}, nil
+			},
+		})
+
+		filter := model.SearchFilter{
+			Sort:  "price_desc",
+			Page:  1,
+			Limit: 10,
+		}
+		res, err := svc.Search(ctx, filter)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !called {
+			t.Fatalf("expected repo.Search to be called")
+		}
+		if res.Total != 1 || len(res.Items) != 1 {
+			t.Errorf("unexpected result: %+v", res)
+		}
+	})
+
+	t.Run("Search rejects invalid filter before calling repo", func(t *testing.T) {
+		called := false
+		svc := NewMotorcycleService(&fakeRepo{
+			searchFunc: func(ctx context.Context, filter model.SearchFilter) (model.SearchResult, error) {
+				called = true
+				return model.SearchResult{}, nil
+			},
+		})
+
+		filter := model.SearchFilter{
+			Page:  0, // Invalid
+			Limit: 10,
+		}
+		_, err := svc.Search(ctx, filter)
+		if err == nil {
+			t.Fatalf("expected error for invalid page")
+		}
+		if called {
+			t.Errorf("repo should not be called when validation fails")
 		}
 	})
 }
