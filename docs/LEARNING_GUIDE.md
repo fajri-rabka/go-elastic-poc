@@ -84,7 +84,7 @@ Yang sudah ada sekarang baru potongan paling bawah: **Go → Elasticsearch** (ce
 | Join | Kuat | Praktis nggak ada; data biasanya didenormalisasi |
 | Transaksi multi-row (ACID) | Ada | **Nggak ada** transaksi lintas document |
 | Visibility setelah write | Langsung kelihatan setelah commit | **Near real-time**: search baru lihat data setelah *refresh* (default ±1 detik). GET by `_id` sudah real-time |
-| Full-text search | Terbatas | Ini kekuatan utamanya |
+| Full-text search | Didukung (via `tsvector`, index GIN, `pg_trgm`), namun tuning relevansi multi-field dan skalabilitas terdistribusinya lebih terbatas | Dirancang khusus sejak awal sebagai search engine terdistribusi (BM25 scoring, field boosting, tokenizers fleksibel) |
 | Ubah tipe field yang sudah ada | `ALTER TABLE` | Umumnya harus bikin index baru lalu *reindex* |
 
 **Analogi:** MySQL itu kayak lemari arsip dengan formulir yang kolomnya sudah fix. Elasticsearch itu kayak gudang yang nyimpen dokumen JSON utuh, plus punya katalog super lengkap (*inverted index*) supaya nyari kata di dalam dokumen jadi cepet banget.
@@ -94,6 +94,7 @@ Yang sudah ada sekarang baru potongan paling bawah: **Go → Elasticsearch** (ce
 **Waspada buat Phase 3+:**
 - Habis insert, kalau langsung *search*, bisa jadi document belum muncul. Itu bukan bug, itu near real-time.
 - Jangan ngandelin dynamic mapping buat data serius — Elastic bisa nebak tipe field dengan salah. Makanya Phase 3 pakai **explicit mapping**.
+- **Catatan Realistis Performa:** Jangan berasumsi bahwa Elasticsearch pasti lebih cepat daripada PostgreSQL dalam semua skenario. Untuk transaksi ACID OLTP, update saldo, join relasional multi-tabel, atau lookup B-Tree single row via primary key, PostgreSQL justru jauh lebih cepat dan hemat resource. Elasticsearch baru unggul ketika workload melibatkan pencarian teks bebas (full-text search), filtering multi-dimensi dokumen tanpa join, dan analitik/agregasi terdistribusi.
 
 ---
 
@@ -597,6 +598,7 @@ Berikut 12 konsep penting Phase 4 yang wajib dipahami junior developer:
   - PUT membaca `id` dari path URL dan mengganti seluruh isi field motor tersebut dengan data baru.
 - **Alasan teknis:** Di Elasticsearch, operasi Index standar (`PUT /index/_doc/id`) secara default bertindak sebagai *upsert* (kalau belum ada dibuatkan baru). Di REST API kita, kita **tidak ingin PUT melakukan upsert diam-diam**, sehingga kita memeriksa keberadaan dokumen terlebih dahulu.
 - **Concern junior:** Jangan gunakan PUT untuk "partial update" (cuma update 1-2 field). Kalau mau partial update, di REST standar itu tugasnya `PATCH`. PUT mengharuskan client mengirimkan seluruh field secara lengkap.
+- **Catatan Standar HTTP (RFC 9110):** Standar HTTP sebenarnya memperbolehkan PUT membuat resource baru jika target URI belum ada (*create or replace*). Namun di API katalog kita, kita sengaja menerapkan *domain policy* ketat: PUT hanya untuk *full replacement* data yang sudah ada (kembalikan 404 jika ID belum terdaftar). Tujuannya agar pembuatan dokumen baru selalu terkontrol lewat POST dengan validasi ID slug yang ketat.
 
 ### 6. Apa itu CRUD?
 - **Pengertian:** Akronim dari Create, Read, Update, Delete — empat operasi dasar manipulasi data pada penyimpanan persistent.
@@ -667,6 +669,7 @@ Berikut 12 konsep penting Phase 4 yang wajib dipahami junior developer:
   ```
 - **Alasan teknis:** Jika client HTTP menutup browser, memutus koneksi Postman, atau timeout terjadi di level web server, context akan otomatis di-cancel (`ctx.Done()`). Elasticsearch client yang mendengarkan context tersebut akan segera membatalkan query dan membebaskan koneksi TCP/socket, mencegah pemborosan resource backend.
 - **Concern junior:** Jangan pernah membuat `context.Background()` baru di dalam handler untuk query database! Selalu teruskan `r.Context()`.
+- **Catatan Server-side Elasticsearch:** Perlu dipahami bahwa context cancellation langsung memutus koneksi di sisi client Go. Namun di sisi server Elasticsearch, proses Lucene yang sudah terlanjur berjalan di level shard tidak selalu langsung berhenti seketika di memori, melainkan akan berhenti pada checkpoint pemeriksaan I/O berikutnya atau saat eksekusi task selesai.
 
 ### 12. Cara Pengujian dengan Postman atau curl
 
@@ -736,14 +739,14 @@ Berikut 16 konsep fundamental Phase 5 yang wajib lu kuasai sebagai backend engin
 - **Filter Context (`filter` / `must_not`):**
   - Menjawab pertanyaan biner sederhana: *"Apakah dokumen ini memenuhi syarat? Ya atau Tidak?"*
   - **TIDAK menghitung score** (`_score` tidak terpengaruh).
-  - Hasil filter otomatis di-cache dalam memory (*node query cache*) oleh Elasticsearch menggunakan bitset, sehingga eksekusi filter berikutnya sangat cepat.
+  - Filter yang sering dipanggil (*frequently used filters*) pada segment yang cukup besar (>= 10.000 dokumen atau >= 3% index) otomatis di-cache dalam memory (*node query cache*) oleh Elasticsearch menggunakan bitset, sehingga eksekusi filter berikutnya sangat cepat. Tidak semua filter pada segment kecil selalu langsung di-cache.
   - Contoh: Filter status `available == true`, filter kategori `category == "matic"`, atau rentang harga `min_price <= price_idr <= max_price`.
 - **Golden Rule:** Jika lu butuh pencarian teks relevansi, taruh di Query Context (`must`). Jika lu butuh filter data kaku (kategori, status, range harga/tanggal), **selalu taruh di Filter Context (`filter`)**.
 
 ### 3. Apa itu `bool` Query dan bagaimana strukturnya?
 - `bool` query adalah query gabungan (*compound query*) di Elasticsearch yang bertindak seperti operator logika boolean di SQL (`AND`, `OR`, `NOT`):
   1. `must`: Harus cocok (seperti `AND`). Berkontribusi ke perhitungan `_score` (Query Context).
-  2. `filter`: Harus cocok (seperti `AND`). **TIDAK** berkontribusi ke `_score` (Filter Context). Hasilnya di-cache.
+  2. `filter`: Harus cocok (seperti `AND`). **TIDAK** berkontribusi ke `_score` (Filter Context). Hasilnya memenuhi syarat untuk di-cache (*cache-eligible*) oleh bitset node query cache.
   3. `should`: Boleh cocok (seperti `OR`). Jika berada di Query Context, mencocokkan lebih banyak clause akan menaikkan `_score`.
   4. `must_not`: Tidak boleh cocok (seperti `NOT` / `!=`). Berada di Filter Context (tidak berpengaruh ke score).
 - **Di codebase kita:**
@@ -760,12 +763,13 @@ Berikut 16 konsep fundamental Phase 5 yang wajib lu kuasai sebagai backend engin
 - Alih-alih membuat beberapa `match` query manual yang di-OR-kan, `multi_match` mengevaluasi kata kunci di field `model_name` dan `description` sekaligus, lalu menggabungkan skor relevansinya sesuai tipe kecocokan (default: `best_fields`).
 
 ### 5. Apa itu Field Boosting (contoh: `model_name^2`)?
-- **Pengertian:** Teknik memberi bobot relevansi lebih tinggi pada field tertentu. Sintaks `model_name^2` berarti skor kecocokan pada field `model_name` dilipatgandakan sebesar **2 kali lipat** dibanding kecocokan pada `description`.
-- **Kenapa penting?** Jika seorang pembeli mencari kata `"BeAT"`, dokumen yang mencantumkan nama model `"BeAT"` jauh lebih relevan untuk berada di urutan teratas daripada motor lain yang kebetulan hanya menyebutkan kata "beat" di dalam paragraf deskripsinya.
-- Boosting memastikan hasil pencarian terasa intuitif bagi pengguna.
+- **Pengertian:** Teknik memberi bobot relevansi lebih tinggi pada field tertentu. Sintaks `model_name^2` berarti skor kecocokan pada field `model_name` diberi pengali bobot relatif (*relevance weight*) sebesar **2 kali lipat** dibanding kecocokan pada `description`.
+- **Kenapa penting?** Jika seorang pembeli mencari kata `"BeAT"`, dokumen yang mencantumkan nama model `"BeAT"` umumnya akan memiliki skor relevansi lebih tinggi daripada motor lain yang kebetulan hanya menyebutkan kata "beat" di dalam paragraf deskripsinya.
+- **Catatan Realistis:** Boosting menaikkan prioritas skor relatif, namun **tidak menjamin secara mutlak** bahwa dokumen pasti selalu berada di ranking 1 pada semua skenario. Algoritma BM25 tetap memperhitungkan faktor lain seperti frekuensi kemunculan kata (Term Frequency), keunikan kata (Inverse Document Frequency), dan panjang teks field (Field Length Normalization).
 
 ### 6. Apa itu `term` Query dan kenapa untuk exact match?
-- `term` query mencari nilai yang **persis sama (exact match)** di dalam inverted index tanpa melakukan analisis/tokenisasi pada nilai pencarian.
+- `term` query mencari nilai yang **persis sama (exact match)** di dalam inverted index tanpa melakukan analisis atau pemecahan token pada nilai pencarian.
+- Pencarian term pada kamus index (*inverted index dictionary / FST*) sangat efisien karena langsung mencari term yang cocok tanpa memproses tokenizer/analyzer.
 - Oleh karena itu, `term` query harus dipasangkan dengan field yang **tidak di-tokenize**, yaitu field bertipe `keyword` (seperti `category`, `transmission`) atau tipe `boolean` (`available`).
 - **Peringatan junior:** Jangan gunakan `term` query pada field bertipe `text` standar! Karena field `text` di-tokenize menjadi huruf kecil per kata oleh standard analyzer, query `term` yang mencari kalimat utuh atau huruf besar akan gagal menemukan dokumen.
 
@@ -776,7 +780,7 @@ Berikut 16 konsep fundamental Phase 5 yang wajib lu kuasai sebagai backend engin
   - `gt`: Greater than (>)
   - `lte`: Less than or equal (<=)
   - `lt`: Less than (<)
-- Di project kita, kita menggunakan `esdsl.NewNumberRangeQuery("price_idr")` di dalam `bool.filter`. Jika client mengirim `min_price=15000000`, kita set `.Gte(...)`. Jika mengirim `max_price=25000000`, kita set `.Lte(...)`. Karena berada di Filter Context, operasi range ini sangat efisien dan di-cache.
+- Di project kita, kita menggunakan `esdsl.NewNumberRangeQuery("price_idr")` di dalam `bool.filter`. Jika client mengirim `min_price=15000000`, kita set `.Gte(...)`. Jika mengirim `max_price=25000000`, kita set `.Lte(...)`. Karena berada di Filter Context, operasi range ini tidak membebani komputasi score dan memenuhi syarat query cache.
 
 ### 8. Bagaimana Sorting bekerja di Elasticsearch?
 - Secara default, jika tidak ada sort yang ditentukan dan ada query pencarian, Elasticsearch akan mengurutkan dokumen berdasarkan skor relevansi: `_score` descending (dokumen paling cocok di paling atas).

@@ -20,6 +20,8 @@ The application stores and queries domain data (Honda motorcycle catalog) as JSO
 
 | Document | Purpose |
 |---|---|
+| [docs/DEMO_GUIDE.md](docs/DEMO_GUIDE.md) | **Step-by-step 5–10 minute demo script for Koh Franz**, covering the complete API walkthrough, Elasticsearch checks, and trade-off discussions |
+| [docs/API.md](docs/API.md) | Complete REST API specification, JSON schemas, query parameters, sorting rules, and HTTP error contracts |
 | [docs/LEARNING_GUIDE.md](docs/LEARNING_GUIDE.md) | Comprehensive engineering guide (Bahasa Indonesia): Elasticsearch core concepts, explicit mapping, typed client, real-time GET vs search, and code architecture walkthrough |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases 1–6: objective, scope, deliverable, definition of done, and runtime validation logs |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Real-world troubleshooting guide for Docker Desktop, WSL2 memory pressure, swap thrashing, connection refused, and timeout handling |
@@ -137,7 +139,7 @@ make run
 ```
 
 The server starts and listens on `http://127.0.0.1:8080` (configured via `HTTP_ADDR`).
-On startup, it verifies connectivity to Elasticsearch and ensures the `motorcycles` index is ready.
+On startup, it verifies connectivity to Elasticsearch and executes `repo.EnsureIndex()`, ensuring the `motorcycles` index is created with explicit strict mapping (or verified if already existing) before accepting requests. Auto-created dynamic mapping is never relied upon.
 Press `Ctrl+C` for graceful shutdown.
 
 ### 3. Test REST API Endpoints
